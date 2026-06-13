@@ -6,7 +6,14 @@ An Agent Skill to optimize context sizes for AI agents by slicing large Markdown
 
 When AI agents process technical books or massive Markdown documents, loading the entire file easily exhausts context limits and inflates input token costs. 
 
-`md-context-slicer` solves this by programmatically dividing books into clean, separate, and properly structured chapter files (using Form Feed `\x0c` control characters or dynamic structural regexes) so the agent can read and process only the specific chapters required for a task.
+`md-context-slicer` solves this by programmatically dividing books into clean, separate, and properly structured chapter files so the agent can read and process only the specific chapters required for a task.
+
+## How It Works
+
+This tool processes any Markdown (`.md`) file, regardless of whether it is structured or flat:
+
+1. **Chapter & PDF Extraction (Heuristic Mode):** If the Markdown file has structured headings or is converted from a PDF (containing Form Feed `\x0c` page breaks), the engine applies advanced precompiled regexes, OCR letter-space corrections, and universal line ending checks to extract chapters dynamically.
+2. **Automatic Fallback Slicing:** If the file is completely flat and no chapters or structures are detected, the tool automatically falls back to splitting the document into logical parts based on a configurable line threshold (defaults to `2000` lines per file, customizable via `--chunk-lines`).
 
 ## Installation
 
