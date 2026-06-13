@@ -420,23 +420,12 @@ def is_valid_title_heuristics(title: str) -> bool:
     if clean_title.endswith(('.', ',', ';', '...', '-')):
         return False
         
-    words = clean_title.split()
-    if not words:
+    # Normalize the title to handle spaced-out characters correctly before counting words
+    normalized = normalize_title(clean_title)
+    words = normalized.split()
+    # If the string has more than 15 words, it is probabilistically a text paragraph, not a title
+    if not words or len(words) > 15:
         return False
-        
-    # Analyze words for paragraph-like lowercase flows
-    for word in words:
-        # Clean word from punctuation characters
-        clean_word = re.sub(r'[^\w]', '', word)
-        if not clean_word:
-            continue
-            
-        if clean_word.islower():
-            # If a word is strictly lowercase, has more than 3 characters, and is not a connector,
-            # then this candidate is likely a regular text paragraph rather than a title.
-            is_connector = CONNECTORS_REGEX.match(clean_word) is not None
-            if not is_connector and len(clean_word) > 3:
-                return False
                 
     return True
 
