@@ -36,6 +36,10 @@ Trigger this skill whenever the user requests to split a book into chapters, seg
 3. **Format Titles**: The script automatically detects chapters, handles multi-line titles, sanitizes filenames, normalizes letter-spaced headers, and prepends a proper `#` (H1) Markdown header.
 4. **Exclude Noise**: The script ignores standard book overhead such as prefaces, licenses, and tables of contents, writing only active chapters.
 
+## Requirements
+
+- **Python 3.9+** (No external dependencies required, uses standard library).
+
 ## Quality Rules
 
 - **Zero-loss Content**: The body text within each page must remain unmodified during extraction. Only structural Form Feeds and redundant line breaks are cleaned.
