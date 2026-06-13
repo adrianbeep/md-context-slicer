@@ -18,7 +18,7 @@ STREAM_IO_BLOCK_SIZE_BYTES = 1048576          # 1 MB block size for streaming fi
 AVG_WORD_LEN_THRESHOLD = 1.5                  # Average length threshold to detect spaced-out letters
 MAX_TITLE_LINE_LENGTH = 80                    # Maximum length of a line within a title
 SAMPLE_LINES_COUNT = 2                        # Lines to retrieve for strategy sampling
-HEADER_SCAN_LINES_COUNT = 5                   # Lines to scan for header checks
+HEADER_SCAN_LINES_COUNT = 10                   # Lines to scan for header checks
 
 # Windows reserved filenames that cannot be written directly to disk
 WINDOWS_RESERVED_NAMES = {
@@ -342,7 +342,9 @@ def _extract_multiline_title(lines: list[str], start_idx: int) -> tuple[list[str
         is_next_spaced = len(next_parts) > 1 and sum(len(sp) for sp in next_parts) / len(next_parts) < AVG_WORD_LEN_THRESHOLD
         is_prev_spaced = len(prev_parts) > 1 and sum(len(sp) for sp in prev_parts) / len(prev_parts) < AVG_WORD_LEN_THRESHOLD
         
-        ends_with_connector = CONNECTORS_REGEX.search(prev_line)
+        # Normalize prev_line to prevent single letters in spaced-out text from matching single-letter connectors (like 'y' in Spanish)
+        prev_norm = normalize_title(prev_line) if is_prev_spaced else prev_line
+        ends_with_connector = CONNECTORS_REGEX.search(prev_norm)
         is_uppercase_flow = prev_line.isupper() and next_line.isupper()
         is_spaced_flow = is_prev_spaced and is_next_spaced
         
@@ -354,6 +356,22 @@ def _extract_multiline_title(lines: list[str], start_idx: int) -> tuple[list[str
             break
             
     return title_parts, lines_added
+
+def is_table_of_contents_page(lines: list[str]) -> bool:
+    """Detects if the lines belong to a Table of Contents (TOC) page by checking for index patterns."""
+    toc_indicators = 0
+    # Match dots followed by numbers at the end of a line (classic index line)
+    toc_pattern = re.compile(r'\.\s*\.\s*\.\s*\d+\s*$|\.\.\.\s*\d+\s*$')
+    
+    for line in lines:
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        # Check for spaced out dots or consecutive dots
+        if " . . ." in cleaned or ". . . ." in cleaned or "  .  ." in cleaned or toc_pattern.search(cleaned):
+            toc_indicators += 1
+            
+    return toc_indicators >= 2
 
 # Submodules to parse specific chapter formats
 def check_titles_strategy(clean_first_line: str, target_titles: set[str], titles_list: list[str]) -> tuple[bool, str, Optional[str], Optional[str], int]:
@@ -368,6 +386,9 @@ def check_titles_strategy(clean_first_line: str, target_titles: set[str], titles
     return False, "", None, None, 0
 
 def check_prefix_strategy(first_line: str, lines: list[str]) -> tuple[bool, str, Optional[str], Optional[list[str]], int]:
+    if is_table_of_contents_page(lines):
+        return False, "Chapter", None, None, 0
+        
     match = CHAPTER_PREFIX_FULL_REGEX.match(first_line)
     if match:
         prefix = "Chapter" if "chapter" in first_line.lower() else "Capítulo"
@@ -389,12 +410,45 @@ def check_prefix_strategy(first_line: str, lines: list[str]) -> tuple[bool, str,
         return True, prefix, num_raw, title_parts, lines_to_remove
     return False, "Chapter", None, None, 0
 
+def is_valid_title_heuristics(title: str) -> bool:
+    """Evaluates if a candidate string looks like a chapter title or a regular text paragraph."""
+    clean_title = title.strip()
+    if not clean_title:
+        return False
+        
+    # A chapter title shouldn't end with typical sentence-ending punctuation (colon excluded as it can separate titles/subtitles)
+    if clean_title.endswith(('.', ',', ';', '...', '-')):
+        return False
+        
+    words = clean_title.split()
+    if not words:
+        return False
+        
+    # Analyze words for paragraph-like lowercase flows
+    for word in words:
+        # Clean word from punctuation characters
+        clean_word = re.sub(r'[^\w]', '', word)
+        if not clean_word:
+            continue
+            
+        if clean_word.islower():
+            # If a word is strictly lowercase, has more than 3 characters, and is not a connector,
+            # then this candidate is likely a regular text paragraph rather than a title.
+            is_connector = CONNECTORS_REGEX.match(clean_word) is not None
+            if not is_connector and len(clean_word) > 3:
+                return False
+                
+    return True
+
 def check_numbered_strategy(first_line: str, lines: list[str]) -> tuple[bool, str, Optional[str], Optional[list[str]], int]:
+    if is_table_of_contents_page(lines):
+        return False, "Chapter", None, None, 0
+        
     clean_num_val = MARKDOWN_HEADER_CLEAN_REGEX.sub('', first_line).strip()
     if NUMBERED_REGEX.match(clean_num_val):
         if len(lines) > 1:
             title_candidate = lines[1]
-            if len(title_candidate) < MAX_CHAPTER_TITLE_LENGTH:
+            if len(title_candidate) < MAX_CHAPTER_TITLE_LENGTH and is_valid_title_heuristics(title_candidate):
                 lines_to_remove = 2
                 title_parts = [title_candidate]
                 
@@ -495,7 +549,15 @@ def split_book(input_path: Path, output_path: Path, strategy: str = "auto", titl
             lines_to_remove = 0
             
             # 1. Detect Chapter based on strategy
-            if first_line.startswith("#") and strategy != "titles":
+            # Only treat generic '#' headers as new chapters if we failed to detect a confident strategy,
+            # indicating we are dealing with a flat markdown document without clear prefix/numbered patterns.
+            is_fallback_generic_markdown = (
+                strategy == "prefix"
+                and prefix_count < CONFIDENCE_THRESHOLD
+                and numbered_count < CONFIDENCE_THRESHOLD
+            )
+            
+            if first_line.startswith("#") and strategy != "titles" and is_fallback_generic_markdown:
                 if not CHAPTER_PREFIX_FULL_REGEX.match(first_line):
                     detected = True
                     prefix = "Chapter"
