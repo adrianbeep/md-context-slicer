@@ -60,6 +60,7 @@ python3 assets/split.py --file <path_to_book.md> --output <path_to_destination> 
 ## Key Features
 
 - **Memory Efficient ($O(1)$ RAM):** Uses Python's native `BufferedReader` to stream files line by line, preventing memory spikes even on huge 100MB+ documents.
+- **Bilingual Support (EN/ES):** The parser heuristics (regex connectors, end-of-book markers, chapter prefixes) are pre-configured and optimized specifically for English and Spanish literature.
 - **Duplication Protection:** If a book has chapters with duplicate names (e.g. multiple "Summary" sections), it appends incrementing suffixes (`_1`, `_2`) to prevent overwriting.
 - **Windows Safety:** Automatically prefix filenames that clash with OS reserved names (`CON`, `PRN`, `AUX`, `NUL`, etc.) to prevent silent file creation errors.
 - **OCR Text Normalization:** Automatically joins spaced-out letters created by PDF extractors (e.g., `T H E  B I G` -> `THE BIG`).
@@ -67,6 +68,7 @@ python3 assets/split.py --file <path_to_book.md> --output <path_to_destination> 
 ## Requirements
 
 - **Python 3.9+** (No external dependencies required, uses standard library).
+- **Supported Languages:** English and Spanish (due to grammar-specific heuristics).
 
 ## License
 

@@ -39,6 +39,7 @@ Trigger this skill whenever the user requests to split a book into chapters, seg
 ## Requirements
 
 - **Python 3.9+** (No external dependencies required, uses standard library).
+- **Language Support**: Pre-configured and optimized specifically for English and Spanish books (due to language-specific grammar connectors and structural keywords).
 
 ## Quality Rules
 
