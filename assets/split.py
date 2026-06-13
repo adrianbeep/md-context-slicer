@@ -45,14 +45,16 @@ CONNECTORS_REGEX = re.compile(
     re.IGNORECASE
 )
 MARKDOWN_HEADER_CLEAN_REGEX = re.compile(r'^#+\s*')
+MARKDOWN_HEADER_END_CLEAN_REGEX = re.compile(r'\s*#+$')
 ILLEGAL_CHARS_REGEX = re.compile(r'[\\/*?:"<>|]')
 LINE_MATCH_REGEX = re.compile(r"^([^\r\n]*)(?:\r?\n|$)", re.MULTILINE)
 END_OF_BOOK_REGEX = re.compile(r"^(index|bibliography|glosario|glossary|bibliografía|conclusión|epílogo)$", re.IGNORECASE)
 
 class SplitterContext:
     """Manages the state and file operations of the split process to decouple it from page iteration."""
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, enhance_subsections: bool = False):
         self.output_dir = output_dir
+        self.enhance_subsections = enhance_subsections
         self.current_chapter: Optional[str] = None
         self.buffer_content: list[str] = []
         self.is_writing: bool = False
@@ -85,6 +87,10 @@ class SplitterContext:
             if safe_name.upper() in WINDOWS_RESERVED_NAMES:
                 safe_name = f"Chapter_{self.chapter_count:02d}_{safe_name}"
                 
+            # Truncate long file names to prevent OS errors (max 100 chars)
+            if len(safe_name) > 100:
+                safe_name = safe_name[:100].strip()
+                
             file_path = self.output_dir / f"{safe_name}.md"
             if file_path.exists():
                 counter = 1
@@ -100,17 +106,24 @@ class SplitterContext:
                     counter += 1
             
             try:
-                # Memory-efficient streaming write (writes parts directly to avoid massive join duplication in RAM)
-                with open(file_path, "w", encoding="utf-8") as f:
-                    first = True
-                    for page in self.buffer_content:
-                        cleaned_page = page.strip()
-                        if cleaned_page:
-                            if not first:
-                                f.write("\n\n")
-                            f.write(cleaned_page)
-                            first = False
-                    f.write("\n")
+                if self.enhance_subsections:
+                    full_text = "".join(self.buffer_content)
+                    processed_text = enhance_with_subsection_headers(full_text)
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(processed_text.strip())
+                        f.write("\n")
+                else:
+                    # Memory-efficient streaming write (writes parts directly to avoid massive join duplication in RAM)
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        first = True
+                        for page in self.buffer_content:
+                            cleaned_page = page.strip()
+                            if cleaned_page:
+                                if not first:
+                                    f.write("\n\n")
+                                f.write(cleaned_page)
+                                first = False
+                        f.write("\n")
             except PermissionError as e:
                 logger.error(f"Permission denied writing chapter file '{file_path}': {e}")
             except FileNotFoundError as e:
@@ -130,7 +143,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-t", "--titles", help="Comma-separated list of chapter titles (used with 'titles' strategy).")
     parser.add_argument("--titles-file", type=Path, help="Path to a text file containing chapter titles, one per line (used with 'titles' strategy).")
     parser.add_argument("--chunk-lines", type=int, default=2000, help="Number of lines per file when splitting by size as a fallback.")
+    parser.add_argument("--chunk-size", type=int, default=8000, help="Maximum character size for contingency chunks.")
+    parser.add_argument("--overlap-size", type=int, default=400, help="Number of overlap characters for contingency chunks.")
     parser.add_argument("-e", "--encoding", default="utf-8", help="Input file encoding (default: utf-8).")
+    parser.add_argument("--enhance-subsections", action="store_true",
+                        help="Automatically detect plain-text subsection titles and convert them to ## headings.")
     return parser.parse_args()
 
 def normalize_title(title: str) -> str:
@@ -139,6 +156,7 @@ def normalize_title(title: str) -> str:
         return ""
     
     cleaned = MARKDOWN_HEADER_CLEAN_REGEX.sub('', cleaned)
+    cleaned = MARKDOWN_HEADER_END_CLEAN_REGEX.sub('', cleaned).strip()
     # Optimization: using native split with literal double spaces to isolate potential spaced-out letter blocks
     parts = [p.strip() for p in cleaned.split("  ") if p.strip()]
     normalized_parts = []
@@ -284,42 +302,212 @@ def stream_book_pages(file_path: Path, use_form_feed: bool, split_pattern: Optio
         except OSError as e:
             logger.error(f"Error reading book stream line by line: {e}")
 
-def split_by_size_streaming(file_path: Path, output_dir: Path, chunk_lines: int = 2000, encoding: str = "utf-8") -> int:
-    """Fallback: Splits a flat file into chunks using generator-like line streaming (O(1) memory)."""
-    chunk_count = 0
-    current_lines: list[str] = []
+def safe_tail(text: str, max_len: int) -> str:
+    """
+    Retorna un substring del final de `text` de longitud máxima aproximada `max_len`,
+    alineado a un límite de palabra para no cortar a mitad de camino.
+    """
+    if len(text) <= max_len:
+        return text
     
-    def write_chunk(chunk_idx: int, lines_list: list[str]):
-        filename = f"Part {chunk_idx:02d}.md"
-        file_path_out = output_dir / filename
-        try:
-            with open(file_path_out, "w", encoding="utf-8") as f:
-                f.write(f"# Part {chunk_idx:02d}\n\n" + "".join(lines_list))
-        except PermissionError as e:
-            logger.error(f"Permission denied writing fallback chunk file '{file_path_out}': {e}")
-        except OSError as e:
-            logger.error(f"Operating system error writing fallback chunk file '{file_path_out}': {e}")
+    limit = len(text) - max_len
+    # Buscar el primer espacio o salto de línea a partir de limit en una ventana de 50 caracteres
+    first_space = text.find(' ', limit, limit + 50)
+    first_newline = text.find('\n', limit, limit + 50)
+    
+    cut = -1
+    if first_space != -1 and first_newline != -1:
+        cut = min(first_space, first_newline)
+    elif first_space != -1:
+        cut = first_space
+    elif first_newline != -1:
+        cut = first_newline
+        
+    if cut != -1:
+        return text[cut + 1:]
+    else:
+        return text[limit:]
 
+def _find_safe_cut(text: str, start: int, end: int) -> int:
+    """Encuentra la última posición segura para cortar (espacio o punto) fuera de bloques de código y tablas."""
+    backtick_count = text.count('```', 0, end)
+    
+    for cut in range(end, start - 1, -1):
+        if cut == start:
+            return start
+            
+        if text[cut:cut+3] == '```':
+            backtick_count -= 1
+            
+        ch = text[cut] if cut < len(text) else ''
+        if ch in (' ', '.'):
+            if backtick_count % 2 == 0:  # fuera de bloque de código
+                line_start = text.rfind('\n', 0, cut) + 1
+                line = text[line_start:cut]
+                if line.count('|') >= 2:
+                    continue
+                return cut
+    return start
+
+def _build_chunks_by_separator(elements: list[str], max_chars: int, overlap_chars: int, separator: str) -> list[str]:
+    """Agrupa elementos (párrafos o líneas) con overlap acumulativo."""
+    chunks = []
+    current_chunk = []
+    current_len = 0
+    for elem in elements:
+        elem_len = len(elem)
+        if current_len + elem_len > max_chars and current_chunk:
+            chunk_text = separator.join(current_chunk)
+            chunks.append(chunk_text)
+            overlap = safe_tail(chunk_text, overlap_chars)
+            current_chunk = [overlap, elem]
+            current_len = len(overlap) + len(separator) + elem_len
+        else:
+            current_chunk.append(elem)
+            current_len += elem_len + len(separator)
+    if current_chunk:
+        chunks.append(separator.join(current_chunk))
+    return chunks
+
+def _build_chunks_by_lines_safe(lines: list[str], max_chars: int, overlap_chars: int) -> list[str]:
+    """Agrupa líneas respetando bloques de código y tablas."""
+    chunks = []
+    current_chunk = []
+    current_len = 0
+    in_code_block = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+
+        is_table = (not in_code_block and line.count('|') >= 2 and
+                    (i+1 < len(lines) and lines[i+1].count('|') >= 2))
+
+        if in_code_block or is_table:
+            block_lines = [line]
+            j = i + 1
+            if is_table:
+                while j < len(lines) and lines[j].count('|') >= 2:
+                    block_lines.append(lines[j])
+                    j += 1
+            else:
+                while j < len(lines) and not lines[j].strip().startswith("```"):
+                    block_lines.append(lines[j])
+                    j += 1
+                if j < len(lines):
+                    block_lines.append(lines[j])
+                    j += 1
+                in_code_block = False
+            
+            block_text = "\n".join(block_lines)
+            block_len = len(block_text)
+            if current_len + block_len > max_chars and current_chunk:
+                chunk_text = "\n".join(current_chunk)
+                chunks.append(chunk_text)
+                overlap = safe_tail(chunk_text, overlap_chars)
+                current_chunk = [overlap, block_text]
+                current_len = len(overlap) + 1 + block_len
+            else:
+                current_chunk.append(block_text)
+                current_len += block_len + 1
+            i = j
+            continue
+
+        line_len = len(line)
+        if current_len + line_len > max_chars and current_chunk:
+            chunk_text = "\n".join(current_chunk)
+            chunks.append(chunk_text)
+            overlap = safe_tail(chunk_text, overlap_chars)
+            current_chunk = [overlap, line]
+            current_len = len(overlap) + 1 + line_len
+        else:
+            current_chunk.append(line)
+            current_len += line_len + 1
+        i += 1
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+    return chunks
+
+def _build_chunks_by_char_safe(text: str, max_chars: int, overlap_chars: int) -> list[str]:
+    """Corta por caracteres con overlap acumulativo en un solo bucle."""
+    chunks = []
+    pos = 0
+    text_len = len(text)
+    overlap = ""
+    while pos < text_len:
+        effective_max = max_chars - len(overlap)
+        if effective_max <= 0:
+            overlap = safe_tail(overlap, max_chars // 2)
+            effective_max = max_chars - len(overlap)
+
+        if pos + effective_max >= text_len:
+            chunk = overlap + text[pos:]
+            chunks.append(chunk)
+            break
+            
+        end = pos + effective_max
+        cut = _find_safe_cut(text, pos, end)
+        if cut <= pos:
+            cut = end
+            
+        chunk = overlap + text[pos:cut]
+        chunks.append(chunk)
+        overlap = safe_tail(chunk, overlap_chars)
+        pos = cut
+    return chunks
+
+def _write_contingency_chunks(chunks: list[str], output_dir: Path, base_name: str) -> int:
+    """Escribe los fragmentos con prefijo de contexto (sin comentarios HTML)."""
+    for i, chunk in enumerate(chunks, 1):
+        prefix = f"[Continuación de {base_name}, fragmento {i}/{len(chunks)}]\n\n"
+        safe_name = f"fragment_{i:03d}.md"
+        file_path = output_dir / safe_name
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(prefix)
+                f.write(chunk)
+                if not chunk.endswith('\n'):
+                    f.write('\n')
+        except OSError as e:
+            logger.error(f"Error writing contingency chunk {file_path}: {e}")
+    logger.warning(f"Contingencia: se generaron {len(chunks)} fragmentos con solapamiento incorporado.")
+    return len(chunks)
+
+def split_by_contingency_streaming(file_path: Path, output_dir: Path,
+                                   max_chars: int = 8000, overlap_chars: int = 400,
+                                   encoding: str = "utf-8") -> int:
+    """
+    Cascada de contingencia con respeto a bloques de código y tablas.
+    Nivel 1: párrafos
+    Nivel 2: líneas completas (respetando bloques ``` y tablas)
+    Nivel 3: caracteres seguros (con detección de límites de palabra fuera de bloques)
+    """
     try:
         with open(file_path, "r", encoding=encoding) as f:
-            for line in f:
-                current_lines.append(line)
-                if len(current_lines) >= chunk_lines:
-                    chunk_count += 1
-                    write_chunk(chunk_count, current_lines)
-                    current_lines = []
-            
-            if current_lines:
-                chunk_count += 1
-                write_chunk(chunk_count, current_lines)
-    except UnicodeDecodeError as e:
-        logger.error(f"Unicode decode error in split_by_size_streaming: {e}")
-        raise
-    except OSError as e:
-        logger.error(f"Error reading file for fallback streaming: {e}")
-        
-    logger.warning(f"No chapters were detected. Split the file into {chunk_count} parts of {chunk_lines} lines each.")
-    return chunk_count
+            text = f.read()
+    except Exception as e:
+        logger.error(f"Cannot read file for contingency: {e}")
+        return 0
+
+    if len(text) <= max_chars:
+        return _write_contingency_chunks([text], output_dir, file_path.stem)
+
+    paragraphs = re.split(r'\n\s*\n', text)
+    if len(paragraphs) > 1:
+        chunks = _build_chunks_by_separator(paragraphs, max_chars, overlap_chars, separator="\n\n")
+        if len(chunks) > 1:
+            return _write_contingency_chunks(chunks, output_dir, file_path.stem)
+
+    lines = text.splitlines()
+    if len(lines) > 1:
+        chunks = _build_chunks_by_lines_safe(lines, max_chars, overlap_chars)
+        if len(chunks) > 1:
+            return _write_contingency_chunks(chunks, output_dir, file_path.stem)
+
+    chunks = _build_chunks_by_char_safe(text, max_chars, overlap_chars)
+    return _write_contingency_chunks(chunks, output_dir, file_path.stem)
 
 def _extract_multiline_title(lines: list[str], start_idx: int) -> tuple[list[str], int]:
     """Helper private function to parse and extract multiline titles to enforce DRY."""
@@ -465,11 +653,135 @@ def find_slice_cut_index(page: str, lines_to_remove: int) -> int:
             return last_pos
     return 0
 
-def split_book(input_path: Path, output_path: Path, strategy: str = "auto", titles_list: Optional[list[str]] = None, chunk_lines: int = 2000, encoding: str = "utf-8") -> bool:
+def starts_with_sentence_start(text: str) -> bool:
+    if not text:
+        return False
+    first = text[0]
+    return first.isupper() or first.isdigit() or first in '"\'“‘(¿¡'
+
+def is_subsection_title(lines: list[str], i: int) -> bool:
+    line = lines[i]
+    # Si la línea tiene sangría significativa, no es un título alineado al margen
+    if line.startswith(' ') or line.startswith('\t'):
+        return False
+        
+    line_clean = line.strip()
+    if not line_clean:
+        return False
+        
+    # La línea anterior DEBE estar vacía o ser un encabezado Markdown existente
+    prev_line = lines[i-1] if i > 0 else ''
+    prev_clean = prev_line.strip()
+    if prev_clean and not prev_clean.startswith('#'):
+        return False
+        
+    # El título debe empezar como inicio de oración (mayúscula, número, comillas)
+    if not starts_with_sentence_start(line_clean):
+        return False
+        
+    # Evitar comandos de consola ($), flags/parámetros (-), shebangs (!) o rutas (/)
+    if line_clean[0] in '$-!/\\':
+        return False
+    # Evitar encabezados existentes, prefijos de capítulos o números standalone
+    if line_clean.startswith('#') or PREFIX_REGEX.match(line_clean) or NUMBERED_REGEX.match(line_clean):
+        return False
+    # Evitar listas, citas o bullets
+    if re.match(r'^\s*([\*\-\+>]|\d+[\.\)])\s+', line_clean):
+        return False
+    if len(line_clean) > MAX_CHAPTER_TITLE_LENGTH:
+        return False
+    if line_clean[-1] in '. ,;:':
+        return False
+    # Evitar títulos que terminen en conectores o artículos (indica wrapping huérfano)
+    if CONNECTORS_REGEX.search(line_clean):
+        return False
+        
+    # Buscar el contenido que sigue al título
+    # Si la línea siguiente está vacía, miramos la que le sigue secuencialmente
+    nxt_clean = ""
+    idx = i + 1
+    while idx < len(lines):
+        candidate = lines[idx].strip()
+        if candidate:
+            nxt_clean = candidate
+            break
+        idx += 1
+        
+    # La línea siguiente no debe estar vacía y debe tener contenido real de párrafo (mínimo 15 caracteres)
+    if not nxt_clean or len(nxt_clean) < 15:
+        return False
+        
+    # La siguiente línea de contenido real también debe empezar como inicio de oración (evita continuaciones de wrap)
+    if not starts_with_sentence_start(nxt_clean):
+        return False
+        
+    words = line_clean.split()
+    if len(words) > 15:
+        return False
+    # Evitar palabras excesivamente largas (como hashes SHA-1, paths, URLs)
+    if any(len(w) > 20 for w in words):
+        return False
+    return True
+
+def enhance_with_subsection_headers(text: str) -> str:
+    lines = text.splitlines()
+    output_lines = []
+    in_code_block = False
+    
+    # 1. Identify preliminary candidates
+    is_candidate = [False] * len(lines)
+    for i, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+            
+        if is_subsection_title(lines, i):
+            is_candidate[i] = True
+
+    # 2. Filter consecutive non-empty candidates (poems, lists, etc.)
+    non_empty_indices = [i for i, line in enumerate(lines) if line.strip()]
+    prev_ne = {}
+    nxt_ne = {}
+    for idx, line_idx in enumerate(non_empty_indices):
+        prev_ne[line_idx] = non_empty_indices[idx-1] if idx > 0 else None
+        nxt_ne[line_idx] = non_empty_indices[idx+1] if idx+1 < len(non_empty_indices) else None
+
+    # 3. Write output applying isolation rule
+    in_code_block = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            output_lines.append(line)
+            continue
+            
+        if in_code_block:
+            output_lines.append(line)
+            continue
+            
+        if is_candidate[i]:
+            p_idx = prev_ne.get(i)
+            n_idx = nxt_ne.get(i)
+            
+            p_is_cand = is_candidate[p_idx] if p_idx is not None else False
+            n_is_cand = is_candidate[n_idx] if n_idx is not None else False
+            
+            # A genuine subsection title must be isolated from other candidates
+            if not p_is_cand and not n_is_cand:
+                output_lines.append(f"## {line.strip()}")
+                continue
+                
+        output_lines.append(line)
+        
+    return "\n".join(output_lines)
+
+def split_book(input_path: Path, output_path: Path, strategy: str = "auto", titles_list: Optional[list[str]] = None, chunk_lines: int = 2000, encoding: str = "utf-8", enhance_subsections: bool = False, chunk_size: int = 8000, overlap_size: int = 400) -> bool:
     try:
         # Pre-compile the dynamic virtual page separator pattern and detect Form Feeds
         use_form_feed = check_has_form_feed(input_path, encoding=encoding)
-        split_pattern = build_split_pattern(strategy, target_titles := set(t.lower().strip() for t in titles_list if t.strip()) if titles_list else None) if not use_form_feed else None
+        target_titles = set(t.lower().strip() for t in titles_list if t.strip()) if titles_list else None
+        split_pattern = build_split_pattern(strategy, target_titles) if not use_form_feed else None
         
         # Initialize the memory-efficient streaming generator
         page_gen = stream_book_pages(input_path, use_form_feed, split_pattern, encoding=encoding)
@@ -489,6 +801,7 @@ def split_book(input_path: Path, output_path: Path, strategy: str = "auto", titl
                 if lines:
                     first_line = lines[0]
                     clean_first = MARKDOWN_HEADER_CLEAN_REGEX.sub('', first_line).strip()
+                    clean_first = MARKDOWN_HEADER_END_CLEAN_REGEX.sub('', clean_first).strip()
                     if PREFIX_REGEX.match(first_line):
                         prefix_count += 1
                     elif NUMBERED_REGEX.match(clean_first):
@@ -513,7 +826,7 @@ def split_book(input_path: Path, output_path: Path, strategy: str = "auto", titl
             logger.info(f"Selected strategy: {strategy}")
             
         # Context state controller for chapter operations
-        ctx = SplitterContext(output_path)
+        ctx = SplitterContext(output_path, enhance_subsections=enhance_subsections)
         
         # Pythonic, C-optimized lazy iteration of multiple iterables using itertools.chain
         for page in itertools.chain(sample_pages, page_gen):
@@ -525,6 +838,7 @@ def split_book(input_path: Path, output_path: Path, strategy: str = "auto", titl
                 
             first_line = lines[0]
             clean_first_line = MARKDOWN_HEADER_CLEAN_REGEX.sub('', first_line).strip()
+            clean_first_line = MARKDOWN_HEADER_END_CLEAN_REGEX.sub('', clean_first_line).strip()
             
             # Stop writing if we hit the end of the book
             if ctx.is_writing and END_OF_BOOK_REGEX.match(clean_first_line):
@@ -610,9 +924,9 @@ def split_book(input_path: Path, output_path: Path, strategy: str = "auto", titl
         # Flush remaining content
         ctx.flush()
             
-        # 3. Fallback: if no chapters were written, split by size using streaming (O(1) memory)
+        # 3. Fallback: if no chapters were written, split using the 3-level contingency cascade
         if ctx.chapter_count == 0:
-            split_by_size_streaming(input_path, output_path, chunk_lines, encoding=encoding)
+            split_by_contingency_streaming(input_path, output_path, max_chars=chunk_size, overlap_chars=overlap_size, encoding=encoding)
         else:
             logger.info(f"Successfully finished. Total chapters written: {ctx.chapter_count}")
             
@@ -670,7 +984,7 @@ def main() -> None:
         if args.strategy == "auto":
             args.strategy = "titles"
             
-    success = split_book(args.file, args.output, strategy=args.strategy, titles_list=titles_list, chunk_lines=args.chunk_lines, encoding=args.encoding)
+    success = split_book(args.file, args.output, strategy=args.strategy, titles_list=titles_list, chunk_lines=args.chunk_lines, encoding=args.encoding, enhance_subsections=args.enhance_subsections, chunk_size=args.chunk_size, overlap_size=args.overlap_size)
     if not success:
         sys.exit(1)
 
