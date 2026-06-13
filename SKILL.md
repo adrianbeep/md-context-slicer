@@ -44,4 +44,5 @@ Trigger this skill whenever the user requests to split a book into chapters, seg
 
 - **Zero-loss Content**: The body text within each page must remain unmodified during extraction. Only structural Form Feeds and redundant line breaks are cleaned.
 - **Strict File Names**: Chapter filenames must follow a padded format (e.g., `Chapter 01 - The Big Picture.md` or `Capítulo 02 - Conceptos Básicos.md`) to maintain alphabetized ordering in filesystem views. Filenames that match Windows reserved words (e.g., `CON`, `NUL`, `AUX`) are automatically prefixed with the chapter indicator to ensure cross-platform compatibility.
+- **Isolated Output Directory**: The agent must specify a dedicated, separate folder as the output directory (e.g., `output_folder/book_chapters/`) instead of the root workspace or shared folders. This prevents polluting target directories with numerous individual chapter files.
 - **H1 Header Injected**: The first line of each output file must start with `# [Chapter Name]` so it conforms to standard Markdown outline hierarchies.
