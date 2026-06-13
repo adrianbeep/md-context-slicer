@@ -42,4 +42,4 @@ python3 assets/split.py --file <path_to_book.md> --output <path_to_destination> 
 
 ## License
 
-Apache-2.0
+MIT

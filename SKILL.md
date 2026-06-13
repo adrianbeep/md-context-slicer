@@ -1,7 +1,7 @@
 ---
 name: md-context-slicer
 description: "Trigger: md-context-slicer, segmentar libro, separar capitulos, split book, parsear capitulos, extraer capitulos md, split md book, book splitter, dividir capitulos. Segmenta un libro en formato Markdown a partir de Form Feeds (saltos de página del PDF) o expresiones regulares y extrae sus capítulos a archivos individuales para optimizar el contexto de los agentes de IA."
-license: Apache-2.0
+license: MIT
 metadata:
   author: adrianbeep
   version: "1.0"
